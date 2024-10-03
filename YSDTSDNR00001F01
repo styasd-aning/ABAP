@@ -84,7 +84,8 @@ FORM f_get_data .
       vbeln,
       arktx,
       fkimg,
-      vrkme
+      vrkme,
+      bukrs_ana
       FROM vbrp
       INTO TABLE @DATA(t_vbrp)
       FOR ALL ENTRIES IN @t_vbrk
@@ -108,7 +109,7 @@ FORM f_get_data .
       WHERE awkey = @t_awkey-awkey
       AND awtyp = 'VBRK'.
 
-" use belnr to look for netwr, brtwr, and mwsbk
+    " use belnr to look for netwr, brtwr, and mwsbk
     IF t_bkpf[] IS NOT INITIAL.
       SELECT
         netwr,
@@ -245,109 +246,158 @@ FORM f_get_data .
 
     "populate t_header
     APPEND x_header TO t_header.
-
-    "10: Item Desc. ;
-    "11: Item Desc. ;
-    "[!] parallel cursor encompasses everthing from here until wbrk-mwsbk
-    READ TABLE t_vbrp TRANSPORTING NO FIELDS WITH KEY vbeln = x_vbrk-vbeln BINARY SEARCH.
-    CASE sy-subrc.
-      WHEN 0.
-*        LOOP AT t_vbrp INTO DATA(x_vbrp) WHERE vbeln = x_vbrk-vbeln.
-        LOOP AT t_vbrp INTO DATA(x_vbrp) FROM sy-tabix.
-          CLEAR x_item.
-          x_item-vbeln = x_vbrp-vbeln.
-          x_item-arktx = x_vbrp-arktx. "10
-          x_item-fkimg = x_vbrp-fkimg. "11
-          x_item-vrkme = x_vbrp-vrkme.
-
-          "[!!!]
-          READ TABLE t_bkpf INTO DATA(x_bkpf) WITH KEY bukrs = x_vbrk-bukrs BINARY SEARCH.
-          CASE sy-subrc.
-            WHEN 0.
-              x_item-belnr = x_bkpf-belnr.
-            WHEN OTHERS.
-              x_item-belnr = 'N/A'.
-          ENDCASE.
-
-
-          "12: DPP
-          "14: DPP+PPN
-          "[!] 19, 20: MWSBK ;
-          READ TABLE t_wbrk INTO DATA(x_wbrk) WITH KEY wbeln = x_bkpf-belnr BINARY SEARCH.
-          CASE sy-subrc.
-            WHEN 0.
-              x_item-netwr = x_wbrk-netwr. "12
-              x_item-brtwr = x_wbrk-brtwr. "14
-              x_item-mwsbk = x_wbrk-mwsbk. "19
-              x_item-waerl = x_wbrk-waerl.
-            WHEN OTHERS.
-              x_item-netwr = 0.
-              x_item-brtwr = 0.
-              x_item-mwsbk = 0.
-              x_item-waerl = 'N/A'.
-          ENDCASE.
-          x_item-total += x_wbrk-brtwr. "15
-          x_item-sub_tot += x_wbrk-netwr. "16
-          x_item-ppn += x_wbrk-mwsbk. "19, 20
-
-          CALL FUNCTION 'SPELL_AMOUNT'
-            EXPORTING
-              amount    = x_item-total
-              currency  = x_item-waerl
-*             FILLER    = ' '
-              language  = sy-langu
-            IMPORTING
-              in_words  = x_item-terbilang "21
-            EXCEPTIONS
-              not_found = 1
-              too_large = 2
-              OTHERS    = 3.
-          IF sy-subrc <> 0.
-            x_item-terbilang = 'NULL'.
-          ENDIF.
-
-          "populate t_item
-          APPEND x_item TO t_item.
-
-          "Populate t_in with data from x_header and x_item
-          APPEND VALUE #(
-        bukrs      = x_header-bukrs    "Company Code
-        vbeln      = x_header-vbeln    "Billing Number
-        butxt      = x_header-butxt    "Company Name
-        adrnr      = x_header-adrnr    "Address Number
-        addrnumber = x_header-addrnumber
-        street     = x_header-street
-        vbtyp      = x_header-vbtyp    "Doc Category
-        title      = x_header-title    "SF title
-        vbelv_tot  = x_header-vbelv_tot"DO Number
-        kunag      = x_header-kunag    "Sold-To Party
-        kunnr      = x_header-kunnr    "Customer number
-        name1      = x_header-name1    "Customer name
-        adr_str    = x_header-adr_str  "Customer Address (struct with lines0...4)
-        fkdat      = x_header-fkdat    "Billing Date
-        due_date   = x_header-due_date "Billing Due
-        arktx      = x_item-arktx      "Item Desc
-        fkimg      = x_item-fkimg      "Billed Qty
-        belnr      = x_item-belnr      "Doc Number
-        netwr      = x_item-netwr      "Net Settlement Amount in Document Currency
-        brtwr      = x_item-brtwr      "Gross Settlement Amount in Document Currency
-        mwsbk      = x_item-mwsbk      "Tax Amount in Document Currency
-        sub_tot    = x_item-sub_tot
-        total      = x_item-total
-        ppn        = x_item-ppn
-        vrkme      = x_item-vrkme
-        waerl      = x_item-waerl
-        terbilang  = x_item-terbilang  "Amount in Words (struct with words, dg0..9)
-        ) TO t_in.
-        ENDLOOP.
-      WHEN OTHERS.
-        x_item-arktx = 'N/A'.
-        x_item-fkimg = 0.
-        x_item-belnr = 'N/A'.
-        x_item-netwr = 0.
-        x_item-brtwr = 0.
-        x_item-mwsbk = 0.
-    ENDCASE.
   ENDLOOP.
+
+  DATA: ld_past_vbeln TYPE vbeln.
+  "10: Item Desc. ;
+  "11: Item Desc. ;
+  "[!] parallel cursor encompasses everthing from here until wbrk-mwsbk
+*    READ TABLE t_vbrp TRANSPORTING NO FIELDS WITH KEY vbeln = x_vbrk-vbeln BINARY SEARCH.
+*    CASE sy-subrc.
+*      WHEN 0.
+  IF t_vbrp[] IS NOT INITIAL.
+*        LOOP AT t_vbrp INTO DATA(x_vbrp) WHERE vbeln = x_vbrk-vbeln.
+    LOOP AT t_vbrp INTO DATA(x_vbrp).
+      CLEAR x_item.
+
+      x_item-vbeln = x_vbrp-vbeln.
+      x_item-arktx = x_vbrp-arktx. "10
+      x_item-fkimg = x_vbrp-fkimg. "11
+      x_item-vrkme = x_vbrp-vrkme.
+
+      "[!!!]
+      READ TABLE t_bkpf INTO DATA(x_bkpf) WITH KEY bukrs = x_vbrp-bukrs_ana BINARY SEARCH.
+      CASE sy-subrc.
+        WHEN 0.
+          x_item-belnr = x_bkpf-belnr.
+        WHEN OTHERS.
+          x_item-belnr = 'N/A'.
+      ENDCASE.
+
+
+      "12: DPP
+      "14: DPP+PPN
+      "[!] 19, 20: MWSBK ;
+      READ TABLE t_wbrk INTO DATA(x_wbrk) WITH KEY wbeln = x_bkpf-belnr BINARY SEARCH.
+      CASE sy-subrc.
+        WHEN 0.
+          x_item-netwr = x_wbrk-netwr. "12
+          x_item-brtwr = x_wbrk-brtwr. "14
+          x_item-mwsbk = x_wbrk-mwsbk. "19
+          x_item-waerl = x_wbrk-waerl.
+        WHEN OTHERS.
+          x_item-netwr = 0.
+          x_item-brtwr = 0.
+          x_item-mwsbk = 0.
+          x_item-waerl = 'N/A'.
+      ENDCASE.
+
+" Only sums total, sub total, ppn, and price string if data belong to same docu number
+      IF x_vbrp-vbeln = ld_past_vbeln.
+        x_item-total += x_wbrk-brtwr. "15
+        x_item-sub_tot += x_wbrk-netwr. "16
+        x_item-ppn += x_wbrk-mwsbk. "19, 20
+
+        CALL FUNCTION 'SPELL_AMOUNT'
+          EXPORTING
+            amount    = x_item-total
+            currency  = x_item-waerl
+*           FILLER    = ' '
+            language  = sy-langu
+          IMPORTING
+            in_words  = x_item-terbilang "21
+          EXCEPTIONS
+            not_found = 1
+            too_large = 2
+            OTHERS    = 3.
+        IF sy-subrc <> 0.
+          x_item-terbilang = 'NULL'.
+        ENDIF.
+      ELSE.
+        CLEAR: x_item-total,
+        x_item-sub_tot,
+        x_item-ppn.
+      ENDIF.
+
+      "populate t_item
+      APPEND x_item TO t_item.
+
+      ld_past_vbeln = x_vbrp-vbeln.
+
+*          "Populate t_in with data from x_header and x_item
+*          APPEND VALUE #(
+*        bukrs      = x_header-bukrs    "Company Code
+*        vbeln      = x_header-vbeln    "Billing Number
+*        butxt      = x_header-butxt    "Company Name
+*        adrnr      = x_header-adrnr    "Address Number
+*        addrnumber = x_header-addrnumber
+*        street     = x_header-street
+*        vbtyp      = x_header-vbtyp    "Doc Category
+*        title      = x_header-title    "SF title
+*        vbelv_tot  = x_header-vbelv_tot"DO Number
+*        kunag      = x_header-kunag    "Sold-To Party
+*        kunnr      = x_header-kunnr    "Customer number
+*        name1      = x_header-name1    "Customer name
+*        adr_str    = x_header-adr_str  "Customer Address (struct with lines0...4)
+*        fkdat      = x_header-fkdat    "Billing Date
+*        due_date   = x_header-due_date "Billing Due
+*        arktx      = x_item-arktx      "Item Desc
+*        fkimg      = x_item-fkimg      "Billed Qty
+*        belnr      = x_item-belnr      "Doc Number
+*        netwr      = x_item-netwr      "Net Settlement Amount in Document Currency
+*        brtwr      = x_item-brtwr      "Gross Settlement Amount in Document Currency
+*        mwsbk      = x_item-mwsbk      "Tax Amount in Document Currency
+*        sub_tot    = x_item-sub_tot
+*        total      = x_item-total
+*        ppn        = x_item-ppn
+*        vrkme      = x_item-vrkme
+*        waerl      = x_item-waerl
+*        terbilang  = x_item-terbilang  "Amount in Words (struct with words, dg0..9)
+*        ) TO t_in.
+    ENDLOOP.
+    clear ld_past_vbeln.
+  ELSE.
+    x_item-arktx = 'N/A'.
+    x_item-fkimg = 0.
+    x_item-belnr = 'N/A'.
+    x_item-netwr = 0.
+    x_item-brtwr = 0.
+    x_item-mwsbk = 0.
+  ENDIF.
+
+  LOOP AT t_header into DATA(x_eheader).
+    LOOP AT t_item into DATA(x_eitem) from sy-tabix.
+    "Populate t_in with data from x_header and x_item
+          APPEND VALUE #(
+        bukrs      = x_eheader-bukrs    "Company Code
+        vbeln      = x_eheader-vbeln    "Billing Number
+        butxt      = x_eheader-butxt    "Company Name
+        adrnr      = x_eheader-adrnr    "Address Number
+        addrnumber = x_eheader-addrnumber
+        street     = x_eheader-street
+        vbtyp      = x_eheader-vbtyp    "Doc Category
+        title      = x_eheader-title    "SF title
+        vbelv_tot  = x_eheader-vbelv_tot"DO Number
+        kunag      = x_eheader-kunag    "Sold-To Party
+        kunnr      = x_eheader-kunnr    "Customer number
+        name1      = x_eheader-name1    "Customer name
+        adr_str    = x_eheader-adr_str  "Customer Address (struct with lines0...4)
+        fkdat      = x_eheader-fkdat    "Billing Date
+        due_date   = x_eheader-due_date "Billing Due
+        arktx      = x_eitem-arktx      "Item Desc
+        fkimg      = x_eitem-fkimg      "Billed Qty
+        belnr      = x_eitem-belnr      "Doc Number
+        netwr      = x_eitem-netwr      "Net Settlement Amount in Document Currency
+        brtwr      = x_eitem-brtwr      "Gross Settlement Amount in Document Currency
+        mwsbk      = x_eitem-mwsbk      "Tax Amount in Document Currency
+        sub_tot    = x_eitem-sub_tot
+        total      = x_eitem-total
+        ppn        = x_eitem-ppn
+        vrkme      = x_eitem-vrkme
+        waerl      = x_eitem-waerl
+        terbilang  = x_eitem-terbilang  "Amount in Words (struct with words, dg0..9)
+        ) TO t_in.
+      endloop.
+    endloop.
 
 ENDFORM.
