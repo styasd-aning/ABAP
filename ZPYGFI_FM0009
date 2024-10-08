@@ -1,0 +1,326 @@
+FUNCTION zpygfi_fm0009.
+*"----------------------------------------------------------------------
+*"*"Local Interface:
+*"  IMPORTING
+*"     REFERENCE(FI_TICKETNO) TYPE  STRING OPTIONAL
+*"     REFERENCE(FI_DOCUMENTNO) TYPE  STRING OPTIONAL
+*"     REFERENCE(FI_COMPANYCODE) TYPE  STRING
+*"     REFERENCE(FI_FISKALYEAR) TYPE  STRING
+*"     REFERENCE(FI_ITEMNO) TYPE  BUZEI OPTIONAL
+*"     REFERENCE(FI_TAXCODE) TYPE  STRING
+*"     REFERENCE(FI_VENDORNO) TYPE  STRING OPTIONAL
+*"     REFERENCE(FI_AMOUNTDPP) TYPE  DMBTR
+*"     REFERENCE(FI_NPWPPEMUNGUT) TYPE  STRING OPTIONAL
+*"     REFERENCE(FI_NPWPVENDOR) TYPE  STRING
+*"     REFERENCE(FI_BUSINESSAREA) TYPE  STRING OPTIONAL
+*"     REFERENCE(FI_NIK) TYPE  STRING OPTIONAL
+*"     REFERENCE(FI_POSTINGDATE) TYPE  STRING
+*"  EXPORTING
+*"     VALUE(FE_STATUS) TYPE  STRING
+*"     VALUE(FE_MESSAGE) TYPE  STRING
+*"     VALUE(FE_RETURNVALUE) TYPE  DMBTR
+*"     VALUE(FE_TARIFMAX) TYPE  DMBTR
+*"----------------------------------------------------------------------
+
+*&---------------------------------------------------------------------*
+*& Data Declaration
+*&---------------------------------------------------------------------*
+*Data netto percetage.
+  TYPES: BEGIN OF lty_zp03,
+           netto TYPE zpphtxdt00003-netto,
+         END OF lty_ZP03,
+
+*Data for table1 taxes threshold.
+         BEGIN OF lty_table1,
+           max_amount TYPE zpphtxdt00033-max_amount,
+           tarif      TYPE zpphtxdt00033-tarif,
+           tarif_non  TYPE zpphtxdt00033-tarif_non,
+           valid_from TYPE zpphtxdt00033-valid_from,
+         END OF lty_table1,
+
+*Data for table2 income types.
+         BEGIN OF lty_table2,
+           phscd TYPE zpphtxdt00034-phscd,
+           frmcd TYPE zpphtxdt00034-frmcd,
+         END OF lty_table2,
+
+" {<ADD>}JIRA:JIRAXXXX /ABAP:SDT /FUNC:EPU /UTT:XXX /08.10.2024/Purpose: Pembulatan Commercial PPh21
+*Data for lt_zp93 posting date and company code
+         BEGIN OF lty_zp93,
+           bukrs TYPE zpygcadt00093-bukrs,
+           prcod TYPE zpygcadt00093-prcod,
+           begda TYPE zpygcadt00093-begda,
+         END OF lty_zp93.
+  "}END ADD OF JIRA: JIRAXXXX
+
+  DATA: lt_zp03      TYPE TABLE OF lty_zp03,
+        lx_zp03      TYPE lty_zp03,
+        lt_table1    TYPE TABLE OF lty_table1,
+        lx_table1    TYPE lty_table1,
+        lt_table2    TYPE TABLE OF lty_table2,
+        lx_table2    TYPE lty_table2,
+        lt_table3    TYPE TABLE OF lty_table1,
+        lx_table3    TYPE lty_table1,
+        " {<ADD>}JIRA:JIRAXXXX /ABAP:SDT /FUNC:EPU /UTT:XXX /08.10.2024/Purpose: Pembulatan Commercial PPh21
+        lt_zp93      TYPE TABLE OF lty_zp93,
+        lx_zp93      TYPE lty_zp93,
+        "}END ADD OF JIRA: JIRAXXXX
+        lt_amountpph TYPE TABLE OF dmbtr,
+        lx_date      TYPE bkpf-budat.
+
+  DATA: ld_flag      TYPE c,
+        ld_amountnet TYPE srmcurr,
+        ld_amountpph TYPE srmcurr,
+        ld_sum       TYPE srmcurr,
+        ld_max       TYPE zpygfde_tarif,
+        ld_npwp      TYPE kna1-stceg.
+
+*Data constansts
+  CONSTANTS: c_success(1)   VALUE 'S',
+             c_error(1)     VALUE 'E',
+             c_errormessage TYPE string VALUE 'Terjadi Kesalahan Sistem, mohon dicoba kembali dalam beberapa saat!',
+             c_errornpwp    TYPE string VALUE 'NPWP Tidak Sesuai Format'.
+
+  DEFINE lm_inamount.
+    &1 = &1 * 100.
+  END-OF-DEFINITION.
+
+  DEFINE lm_outamount.
+    &1 = &1 / 100.
+  END-OF-DEFINITION.
+
+*&---------------------------------------------------------------------*
+*& Filter and Getting Posting Date
+*&---------------------------------------------------------------------*
+*Convert postingdate to sap standart.
+  IF fi_postingdate IS NOT INITIAL.
+    DATA(ld_posting_date) = fi_postingdate.
+    IF ld_posting_date CS '.'.
+      REPLACE ALL OCCURRENCES OF '.' IN ld_posting_date WITH ''.
+      CONCATENATE ld_posting_date+4(4) ld_posting_date+2(2) ld_posting_date(2) INTO ld_posting_date.
+    ENDIF.
+
+*if postingdate input is empty select from table bkpf
+  ELSE.
+    SELECT budat
+      FROM bkpf
+      INTO lx_date
+      WHERE belnr = fi_documentno AND
+            bukrs = fi_companycode AND
+            gjahr = fi_fiskalyear.
+    ENDSELECT.
+    IF lx_date IS INITIAL.
+      EXIT.
+    ENDIF.
+    ld_posting_date = lx_date.
+  ENDIF.
+
+*&---------------------------------------------------------------------*
+*& Convert and Check NPWP
+*&---------------------------------------------------------------------*
+*Check if npwp input contain . and -. If not meet check npwpw length is 16. Error when condition not meet
+  IF fi_npwpvendor IS NOT INITIAL.
+    IF fi_npwpvendor NA '.' AND fi_npwpvendor NA '-'.
+      IF strlen( fi_npwpvendor ) NE 16.
+        fe_status = c_error.
+        fe_message = c_errornpwp.
+        fe_returnvalue = 0.
+        fe_tarifmax = 0.
+        EXIT.
+      ENDIF.
+
+*If first condition is meet check npwp formattign using function module
+    ELSEIF fi_npwpvendor CA '.' AND fi_npwpvendor CA '-'.
+      ld_npwp = fi_npwpvendor.
+      CALL FUNCTION 'ZPYGLFG_CHECK_NPWP_FORMAT_FP'
+        EXPORTING
+          fi_stceg                 = ld_npwp
+          fi_show_message          = space
+        EXCEPTIONS
+          npwp_tidak_sesuai_format = 1
+          gunakan_karakter_numeric = 2
+          OTHERS                   = 3.
+      IF sy-subrc <> 0.
+        fe_status = c_error.
+        fe_message = c_errornpwp.
+        fe_returnvalue = 0.
+        fe_tarifmax = 0.
+        EXIT.
+      ENDIF.
+
+    ELSE.
+*  do nothing
+    ENDIF.
+
+*Npwp valid flag will raise to 1 if not flag equal to 0.
+    ld_flag = 1.
+  ELSE.
+    ld_flag = 0.
+  ENDIF.
+
+*&---------------------------------------------------------------------*
+*& Query to Determine income type and netto for tax calculation
+*&---------------------------------------------------------------------*
+*Query for income type
+  SELECT phscd
+         frmcd
+  FROM zpphtxdt00034
+    INTO TABLE lt_table2
+    WHERE tax_type = fi_taxcode.
+
+*Query for amount of netto for tax calculation
+  IF lt_table2[] IS NOT INITIAL.
+    SELECT netto
+    FROM zpphtxdt00003
+      INTO TABLE lt_zp03
+      FOR ALL ENTRIES IN lt_table2
+      WHERE frmcd = lt_table2-frmcd AND
+            phscd = lt_table2-phscd.
+  ELSE.
+  ENDIF.
+
+*&---------------------------------------------------------------------*
+*& Query to Determine spesific max amount
+*&---------------------------------------------------------------------*
+  IF lt_table2[] IS NOT INITIAL.
+
+*Select closest date that less than or equal to posting date
+    SELECT valid_from
+      FROM zpphtxdt00033
+      INTO TABLE @DATA(lt_datemax)
+      WHERE valid_from LE @ld_posting_date.
+    SORT lt_datemax BY valid_from DESCENDING.
+    DATA(ld_max_date) = lt_datemax[ 1 ]-valid_from.
+
+*Select max amount and tarif from that spesific date
+    SELECT max_amount
+           tarif
+           tarif_non
+    FROM zpphtxdt00033
+      INTO TABLE lt_table1
+      FOR ALL ENTRIES IN lt_table2
+      WHERE frmcd = lt_table2-frmcd AND
+            valid_from EQ ld_max_date.
+
+    SORT lt_table1 BY max_amount ASCENDING.
+  ELSE.
+  ENDIF.
+
+*&---------------------------------------------------------------------*
+*& Get neto amount and times it to input dpp (half or full).
+*&---------------------------------------------------------------------*
+  READ TABLE lt_zp03 INDEX 1 INTO lx_zp03.
+  IF sy-subrc = 0.
+*    ld_amountnet = fi_amountdpp - ( fi_amountdpp * ( lx_ZP03-netto / 100 ) ).
+    DATA(ld_dpp) = fi_amountdpp.
+    lm_inamount ld_dpp.
+    ld_amountnet = ld_dpp - ( ld_dpp * lx_ZP03-netto / 100 ).
+*     lm_outamount ld_amountnet. "dibawah masih ada komparasi
+    CLEAR lx_zp03.
+  ENDIF.
+
+*&---------------------------------------------------------------------*
+*& Taxes Calculation
+*&---------------------------------------------------------------------*
+  LOOP AT lt_table1 INTO lx_table1.
+    lm_inamount lx_table1-max_amount.
+* Data amount will enter loop until it reacher minus or zero
+    IF ld_amountnet GT 0.
+*If amount greater or equal than max amount use max amount as multiplier and record every percentage tax
+      IF ld_amountnet GE lx_table1-max_amount.
+        IF ld_flag = 1.
+*          ld_amountpph = lx_table1-max_amount * ( lx_table1-tarif / 100 ).
+          ld_amountpph = lx_table1-max_amount *  lx_table1-tarif / 100 .
+          ld_max = lx_table1-tarif.
+        ELSE.
+*          ld_amountpph = lx_table1-max_amount * ( lx_table1-tarif_non / 100 ).
+          ld_amountpph = lx_table1-max_amount *  lx_table1-tarif_non / 100 .
+          ld_max = lx_table1-tarif_non.
+        ENDIF.
+
+      ELSE.
+
+*If amount less than max amount use amount as multiplier and record every percentage tax
+        IF ld_amountnet LT lx_table1-max_amount.
+          IF ld_flag = 1.
+*            ld_amountpph = ld_amountnet * ( lx_table1-tarif / 100 ).
+            ld_amountpph = ld_amountnet *  lx_table1-tarif / 100 .
+            ld_max = lx_table1-tarif.
+          ELSE.
+*            ld_amountpph = ld_amountnet * ( lx_table1-tarif_non / 100 ).
+            ld_amountpph = ld_amountnet *  lx_table1-tarif_non / 100 .
+            ld_max = lx_table1-tarif_non.
+          ENDIF.
+
+        ENDIF.
+      ENDIF.
+*Reduce amount in every iteration by subtracting with max amount
+      ld_amountnet = ld_amountnet - lx_table1-max_amount.
+*Record every tax calculation
+*      lm_outamount ld_amountpph.  dibalikin aja setelah sum krn ada pembulatan kebawah
+      APPEND ld_amountpph TO lt_amountpph.
+
+    ELSE.
+      EXIT. " Exit the loop if ld_amountnet is not greater than 0
+    ENDIF.
+  ENDLOOP.
+
+*&---------------------------------------------------------------------*
+*& Append Data
+*&---------------------------------------------------------------------*
+*Sum or add every tax in lt_amountpph
+  LOOP AT lt_amountpph INTO DATA(lx_amountpph).
+    ld_sum = ld_sum + lx_amountpph.
+  ENDLOOP.
+
+  DATA ld_sum2 LIKE ld_sum.
+  " {<MOD>}JIRA:JIRAXXXX /ABAP:SDT /FUNC:EPU /UTT:XXX /08.10.2024/Purpose: Pembulatan Commercial PPh21
+*  ld_sum2 = floor( ld_sum ).
+*  ld_sum = ld_sum2.
+*  lm_outamount ld_sum.
+  "}END MOD OF JIRA: JIRAXXXX
+
+  " {<ADD>}JIRA:JIRAXXXX /ABAP:SDT /FUNC:EPU /UTT:XXX /08.10.2024/Purpose: Pembulatan Commercial PPh21
+*  Check if input company code is in CR21
+  SELECT SINGLE bukrs, prcod, begda FROM zpygcadt00093
+    INTO @lx_zp93
+    WHERE bukrs = @fi_companycode
+    AND prcod = 'CR21'.
+
+  IF lx_zp93 IS NOT INITIAL.
+*Rounding tax for company code in date range CR21
+    IF sy-subrc = 0 AND ld_posting_date GE lx_zp93-begda.
+      lm_outamount ld_sum.
+      ld_sum2 = round( val = ld_sum dec = 2 ). "commercial rounding
+
+      " Ensure rounding up if the value ends in .5 or more
+      IF ( ld_sum2 - floor( ld_sum2 ) ) >= +'0.005'.
+        ld_sum2 = ceil( ld_sum2 ). " Round up
+      ENDIF.
+
+      ld_sum = ld_sum2.
+*Rounding tax for company code not in date range CR21
+    ELSE.
+      ld_sum2 = floor( ld_sum ).
+      ld_sum = ld_sum2.
+      lm_outamount ld_sum.
+    ENDIF.
+    CLEAR lx_zp93.
+  ENDIF.
+    "}END ADD OF JIRA: JIRAXXXX
+
+*Remove decimal number for rounding number
+*  ld_sum = trunc( ld_sum ).
+
+  IF lt_amountpph[] IS NOT INITIAL.
+    fe_status = c_success.
+    fe_message = ''.
+    fe_returnvalue = ld_sum.
+    fe_tarifmax = ld_max.
+  ELSE.
+    fe_status = c_error.
+    fe_message = c_errormessage.
+    fe_returnvalue = ld_sum.
+    fe_tarifmax = ld_max.
+  ENDIF.
+ENDFUNCTION.
